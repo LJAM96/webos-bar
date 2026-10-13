@@ -1,0 +1,16 @@
+{
+  "id": "com.lukemulvaney.bar",
+  "version": "1.0.0",
+  "vendor": "lukemulvaney",
+  "type": "web",
+  "main": "index.html",
+  "title": "Bar",
+  "icon": "assets/icon80.png",
+  "largeIcon": "assets/icon130.png",
+  "transparent": true,
+  "defaultWindowType": "overlay",
+  "noSplashOnLaunch": true,
+  "spinnerOnLaunch": false,
+  "disableBackHistoryAPI": true,
+  "visible": true
+}

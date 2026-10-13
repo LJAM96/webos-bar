@@ -1,0 +1,10 @@
+#!/bin/sh
+# webosbrew boot hook: reapply the tvweb CEC input patch if an update wiped it.
+# Runs after 50-* hooks (lexical order); tvweb's own starter fires detached
+# after a delay, so a patch applied here is live before the server starts.
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin:$PATH"
+[ -x /usr/bin/python3 ] || exit 0
+[ -f /var/lib/barwatcher/watch.py ] || exit 0
+/usr/bin/python3 /var/lib/barwatcher/watch.py --cecfix-only \
+  >>/var/lib/barwatcher/watch.log 2>&1
+exit 0

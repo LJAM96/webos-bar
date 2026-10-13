@@ -1,0 +1,19 @@
+#!/bin/sh
+# webosbrew boot hook: start the HOME-key bar watcher.
+# Install to /var/lib/webosbrew/init.d/50-barwatcher (chmod +x).
+# Deliberately defensive: never block boot. The watcher is passive (it only
+# reads key events, never grabs the remote), so if it is missing or python is
+# gone the TV behaves exactly as stock.
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin:$PATH"
+[ -x /usr/bin/python3 ] || exit 0
+[ -f /var/lib/barwatcher/watch.py ] || exit 0
+
+(
+  sleep 5
+  /usr/bin/pkill -f 'barwatcher/watch.py' 2>/dev/null || true
+  sleep 1
+  setsid /usr/bin/python3 /var/lib/barwatcher/watch.py \
+    < /dev/null >>/var/lib/barwatcher/watch.log 2>&1 &
+) &
+
+exit 0

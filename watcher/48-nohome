@@ -1,0 +1,82 @@
+#!/bin/sh
+# webosbrew boot hook: no-Home standard. Hides the Home app behind an empty
+# directory (nothing is deleted), stops any Home renderer, marks no-home mode
+# so the watcher routes HOME to the overlay bar, then puts the last-used
+# input back on screen with its CEC id (direct luna call, no tvweb wait).
+#
+# Install to /var/lib/webosbrew/init.d/48-nohome (chmod +x).
+# Revert: delete this hook and /var/lib/barwatcher/no-home, then reboot.
+export PATH="/bin:/sbin:/usr/bin:/usr/sbin:$PATH"
+
+HOMEAPP=/usr/palm/applications/com.webos.app.home
+MARK=/var/lib/barwatcher/no-home
+PRELOAD_CONF=/var/preferences/webos-preload-manager-conf.json
+
+[ -d "$HOMEAPP" ] || exit 0
+mkdir -p /tmp/emptyhome
+hide_home() {
+  # Idempotent: never stack a second bind over an already-covered target
+  # (repeat mounts pile up in /proc/mounts and slow the whole system down).
+  if ! grep -qF " $HOMEAPP " /proc/mounts 2>/dev/null; then
+    mount --bind /tmp/emptyhome "$HOMEAPP" 2>/dev/null
+  fi
+  # Sandboxed views of the same tree, as used by the other home hooks.
+  for j in \
+    /mnt/lg/cmn_data/var/palm/jail/lg.thinqai.adapter/usr/palm/applications/com.webos.app.home \
+    /mnt/lg/flash/data/var/palm/jail/lg.thinqai.adapter/usr/palm/applications/com.webos.app.home \
+    /mnt/lg/user/var/palm/jail/lg.thinqai.adapter/usr/palm/applications/com.webos.app.home \
+    /mnt/lg/cmn_data/var/palm/jail/com.webos.service.voice.performer/usr/palm/applications/com.webos.app.home \
+    /mnt/lg/flash/data/var/palm/jail/com.webos.service.voice.performer/usr/palm/applications/com.webos.app.home \
+    /mnt/lg/user/var/palm/jail/com.webos.service.voice.performer/usr/palm/applications/com.webos.app.home; do
+    if [ -d "$j" ] && ! grep -qF " $j " /proc/mounts 2>/dev/null; then
+      mount --bind /tmp/emptyhome "$j" 2>/dev/null
+    fi
+  done
+}
+# Preload guard: the system preloadmanager otherwise relaunches Home every
+# few seconds (its allowedApps list learns Home from stock usage), which is
+# the boot-time Home flash and constant background churn. Keep Home out of
+# that list; the edit persists in /var so future boots start clean.
+if [ -f "$PRELOAD_CONF" ] && grep -q 'com.webos.app.home' "$PRELOAD_CONF" 2>/dev/null; then
+  mkdir -p /var/lib/barwatcher/profile-baks 2>/dev/null
+  cp "$PRELOAD_CONF" /var/lib/barwatcher/profile-baks/preload-conf.json.bak-homefix 2>/dev/null
+  if /usr/bin/python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.get('allowedApps',{}).pop('com.webos.app.home',None); json.dump(d,open(p,'w'))" "$PRELOAD_CONF" 2>/dev/null; then
+    systemctl restart preload-manager 2>/dev/null || systemctl stop preload-manager 2>/dev/null || true
+  fi
+fi
+hide_home
+/usr/bin/pkill -f '[f]lutter.*app.home' 2>/dev/null || true
+mkdir -p /var/lib/barwatcher
+touch "$MARK"
+
+# Fast restore loop (detached so boot is never held up): re-assert the hide,
+# drop any Home renderer, and switch to the last input until video is back.
+# 2s cadence so a Home flash lasts ~2s, not ~5s; exits on success or after
+# ~90s; the watcher backstop covers anything later.
+# stdin is /dev/null: luna-send fails silently when it inherits a socket.
+(
+  n=0
+  while [ "$n" -lt 45 ]; do
+    hide_home
+    /usr/bin/pkill -f '[f]lutter.*app.home' 2>/dev/null || true
+    fg=$(luna-send -n 1 -f luna://com.webos.applicationManager/getForegroundAppInfo '{}' < /dev/null 2>/dev/null | grep -o '"appId": *"[^"]*"' | head -n 1)
+    if [ -z "$fg" ]; then
+      sleep 2
+      n=$((n + 1))
+      continue
+    fi
+    case "$fg" in
+      *com.webos.app.home*|*'""'*)
+        /usr/bin/python3 /var/lib/barwatcher/boot-input.py < /dev/null 2>/dev/null
+        ;;
+      *)
+        echo "$(date): nohome boot settled on $fg" >> /var/lib/barwatcher/watch.log
+        break
+        ;;
+    esac
+    sleep 2
+    n=$((n + 1))
+  done
+) &
+
+exit 0

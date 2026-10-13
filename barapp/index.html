@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Bar</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%; width: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  }
+  #scrim {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 150px 0 0 0;
+    background: linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0.88) 100%);
+    display: flex; justify-content: center;
+  }
+  #row {
+    display: inline-flex; align-items: flex-start;
+    gap: 14px;
+    overflow-x: auto;
+    max-width: 96vw;
+    padding: 88px 30px 22px 30px;
+    margin-bottom: 26px;
+    scrollbar-width: none;
+  }
+  #row::-webkit-scrollbar { display: none; }
+  .tile {
+    flex: 0 0 96px;
+    width: 96px;
+    min-width: 96px;
+    max-width: 96px;
+    position: relative;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    padding: 0;
+    text-align: center;
+  }
+  .tile:focus { outline: none; }
+  .card {
+    width: 96px; height: 96px;
+    border-radius: 22px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+  }
+  .card img {
+    width: 56px; height: 56px;
+    object-fit: contain;
+  }
+  /* Input glyphs render white by default, matching the Home shelf treatment
+     regardless of the source file's own colors. App artwork is untouched. */
+  .card img.glyph {
+    width: 84px; height: 84px;
+    filter: brightness(0) invert(1);
+  }
+  .card img.photo { width: 100%; height: 100%; object-fit: cover; }
+  .tile:focus .card {
+    transform: scale(1.06);
+    box-shadow: 0 0 0 4px #fff, 0 10px 40px rgba(0,0,0,0.6);
+  }
+  .tile.hiddenTile .card { opacity: 0.3; filter: grayscale(1); }
+  .tile.editing .card { box-shadow: 0 0 0 4px #1ec15f; }
+  /* APPS tile: green card, grid glyph, caption inside (as on Home). */
+  .appsgrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+  }
+  .appsgrid i {
+    width: 20px; height: 20px;
+    background: #fff;
+    border-radius: 6px;
+    display: block;
+  }
+  .incard { text-align: center; }
+  .incard .cap {
+    color: #fff; font-size: 15px; letter-spacing: 2px;
+    margin-top: 7px; font-weight: 600;
+  }
+  .livetxt {
+    color: #fff; font-size: 26px; font-weight: 700; letter-spacing: 1px;
+    border: 3px solid #fff; border-radius: 8px;
+    padding: 3px 9px;
+  }
+  .bigchar { color: #fff; font-size: 64px; line-height: 1; }
+  /* Per-tile edit menu: small pill under the focused card. */
+  .tilemenu {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 12px;
+    display: none;
+    background: rgba(20, 20, 20, 0.95);
+    border: 2px solid #1ec15f;
+    border-radius: 20px;
+    padding: 8px 10px;
+    white-space: nowrap;
+    z-index: 5;
+  }
+  .tilemenu.open { display: block; }
+  .tilemenu button {
+    background: transparent;
+    border: 0;
+    color: #fff;
+    font-size: 22px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  .tilemenu button:focus {
+    outline: none;
+    background: rgba(30, 193, 95, 0.35);
+  }
+  #dbg {
+    position: fixed; left: 0; right: 0; top: 0;
+    background: rgba(180, 0, 0, 0.9); color: #fff;
+    font-size: 22px; padding: 12px 20px;
+    display: none; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+  <div id="dbg"></div>
+  <div id="scrim"><div id="row" role="toolbar" aria-label="Inputs"></div></div>
+<script>
+(function () {
+  'use strict';
+  var API = 'http://127.0.0.1:8080';
+  var SELF = 'com.lukemulvaney.bar';
+  var LS_ORDER = 'bar.order.v1';
+  var LS_HIDDEN = 'bar.hidden.v1';
+  var row = document.getElementById('row');
+  var dbg = document.getElementById('dbg');
+
+  var editMode = false;
+  var menuTile = null; // tile object whose action menu is open
+  var tiles = [];      // rendered tile objects in order
+
+  // Long-press (hold OK) opens a context menu on the focused tile.
+  // Enter activates buttons on keyDOWN natively, so the keydown is always
+  // preventDefaulted and the tap is replayed manually on keyup — that makes
+  // hold-vs-tap deterministic instead of racing the native click.
+  var LONG_MS = 650;
+  var pressTimer = null;
+  var pressFired = false;
+
+  function showDbg(msg) {
+    try {
+      dbg.style.display = 'block';
+      dbg.textContent = 'BAR DEBUG: ' + msg;
+    } catch (e) {}
+  }
+  window.onerror = function (m) { showDbg(String(m)); };
+
+  function loadJSON(key, fallback) {
+    try {
+      var v = window.localStorage.getItem(key);
+      return v ? JSON.parse(v) : fallback;
+    } catch (e) { return fallback; }
+  }
+  function saveJSON(key, val) {
+    try { window.localStorage.setItem(key, JSON.stringify(val)); }
+    catch (e) {}
+  }
+
+  function closeBar() {
+    try {
+      if (window.webOS && webOS.platformBack) { webOS.platformBack(); return; }
+    } catch (e) {}
+    try { window.close(); } catch (e) {}
+  }
+
+  function postControl(action, value, cb) {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', API + '/api/control', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState === 4) cb(xhr.status === 200);
+      };
+      xhr.onerror = function () { cb(false); };
+      xhr.send(JSON.stringify({ action: action, value: value }));
+    } catch (e) { cb(false); }
+  }
+
+  function postUninstall(id, cb) {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', API + '/api/apps/uninstall', true);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        var ok = false;
+        try { ok = xhr.status === 200 && !!JSON.parse(xhr.responseText).ok; }
+        catch (e) { ok = false; }
+        cb(ok);
+      };
+      xhr.onerror = function () { cb(false); };
+      xhr.send(JSON.stringify({ id: id }));
+    } catch (e) { cb(false); }
+  }
+
+  function shortId(appId) {
+    return String(appId || '').replace('com.webos.app.', '');
+  }
+
+  function isInput(id) {
+    return id === 'com.webos.app.livetv' || /^com\.webos\.app\.(hdmi|av|comp|dp|usbc)/.test(id);
+  }
+
+  function isStructural(t) {
+    return t.kind === 'edit' || t.kind === 'close';
+  }
+
+  function onPick(t) {
+    if (t.id === 'edit') { setEditMode(!editMode); return; }
+    if (editMode) { openMenu(t); return; }
+    activate(t);
+  }
+
+  function activate(t) {
+    if (t.id === SELF) return;
+    if (t.id === 'close') { closeBar(); return; }
+    if (isInput(t.id)) {
+      var ctl = (t.id === 'com.webos.app.livetv') ? 'livetv' : shortId(t.id);
+      postControl('input', ctl, function (ok) {
+        if (!ok) showDbg('switch failed: ' + ctl);
+        else closeBar();
+      });
+      return;
+    }
+    postControl('launchApp', t.id, function () { closeBar(); });
+  }
+
+  function cardContent(t) {
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.style.background = t.bg || '#3a3a3a';
+    if (t.kind === 'apps') {
+      var inc = document.createElement('div');
+      inc.className = 'incard';
+      inc.innerHTML = '<div class="appsgrid"><i></i><i></i><i></i><i></i></div>' +
+        '<div class="cap">APPS</div>';
+      card.appendChild(inc);
+    } else if (t.kind === 'live') {
+      var lt = document.createElement('div');
+      lt.className = 'livetxt';
+      lt.textContent = 'LIVE';
+      card.appendChild(lt);
+    } else if (t.kind === 'close' || t.kind === 'edit') {
+      var ch = document.createElement('div');
+      ch.className = 'bigchar';
+      ch.textContent = t.kind === 'close' ? '\u00d7' : '\u270e';
+      card.appendChild(ch);
+      card.style.background = t.kind === 'edit' ? '#b5838d' : '#1c1c1c';
+    } else {
+      var img = document.createElement('img');
+      img.alt = '';
+      if (/^com\.webos\.app\.(hdmi|av|comp|dp|usbc)/.test(t.id)) img.classList.add('glyph');
+      img.src = API + '/api/apps/icon?id=' + encodeURIComponent(t.id);
+      img.addEventListener('error', function () { img.style.display = 'none'; });
+      card.appendChild(img);
+    }
+    return card;
+  }
+
+  function orderedTiles(points) {
+    var byId = {};
+    points.forEach(function (p) { if (p.id && p.id !== SELF) byId[p.id] = p; });
+    var order = loadJSON(LS_ORDER, null);
+    var hidden = loadJSON(LS_HIDDEN, {});
+    var list = [];
+    function push(id, fallback) {
+      var p = byId[id];
+      if (id === 'com.webos.app.discovery') {
+        list.push({ id: id, title: 'Apps', kind: 'apps', bg: '#4faa6e',
+                    hidden: !!hidden[id] });
+      } else if (id === 'com.webos.app.livetv') {
+        list.push({ id: id, title: (p && p.title) || 'Live TV', kind: 'live',
+                    bg: (p && p.iconColor) || '#E55E78',
+                    hidden: !!hidden[id] });
+      } else if (p) {
+        list.push({ id: id, title: p.title || id,
+                    bg: p.iconColor || p.bgColor || '#3a3a3a',
+                    removable: !!p.removable,
+                    hidden: !!hidden[id] });
+      } else if (fallback) {
+        list.push(fallback);
+      }
+    }
+    if (order && order.length) {
+      order.forEach(function (id) { if (byId[id]) push(id); });
+      Object.keys(byId).forEach(function (id) {
+        if (order.indexOf(id) < 0) push(id);
+      });
+    } else {
+      points.forEach(function (p) { push(p.id); });
+    }
+    // Structural tiles always last, in fixed spots.
+    list.push({ id: 'edit', title: 'Edit', kind: 'edit' });
+    list.push({ id: 'close', title: 'Close', kind: 'close' });
+    if (!fallbackPresent(list)) {
+      list.splice(list.length - 3, 0,
+        { id: 'com.webos.app.livetv', title: 'Live TV', kind: 'live', bg: '#E55E78' });
+    }
+    return list;
+  }
+
+  function fallbackPresent(list) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === 'com.webos.app.livetv') return true;
+    }
+    return false;
+  }
+
+  function persist() {
+    saveJSON(LS_ORDER, tiles.map(function (t) { return t.id; }));
+    var hidden = {};
+    tiles.forEach(function (t) { if (t.hidden) hidden[t.id] = true; });
+    saveJSON(LS_HIDDEN, hidden);
+  }
+
+  function visibleTiles() {
+    if (editMode) return tiles;
+    return tiles.filter(function (t) { return !t.hidden; });
+  }
+
+  function render(focusId) {
+    row.innerHTML = '';
+    closeMenu();
+    var list = visibleTiles();
+    list.forEach(function (t) {
+      var b = document.createElement('button');
+      var editable = editMode && !isStructural(t);
+      var editOn = editMode && t.kind === 'edit';
+      b.className = 'tile' + (t.hidden ? ' hiddenTile' : '') +
+        ((editable || editOn) ? ' editing' : '');
+      b.setAttribute('aria-label', t.title + (t.hidden ? ' (hidden)' : ''));
+      b.appendChild(cardContent(t));
+      var menu = document.createElement('div');
+      menu.className = 'tilemenu';
+      b.appendChild(menu);
+      t.el = b;
+      t.menuEl = menu;
+      b.addEventListener('click', function () { onPick(t); });
+      var img = b.querySelector('img');
+      if (img) {
+        img.addEventListener('load', function () {
+          try {
+            if (img.naturalWidth > 110 && !img.classList.contains('glyph')) {
+              img.classList.add('photo');
+            }
+          } catch (e) {}
+        });
+      }
+      row.appendChild(b);
+    });
+    var target = null;
+    if (focusId) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === focusId) { target = list[i].el; break; }
+      }
+    }
+    (target || row.querySelector('.tile')).focus({preventScroll:true});
+  }
+
+  function moveTile(t, dir, reopen) {
+    var idx = tiles.indexOf(t);
+    var j = idx + dir;
+    if (idx < 0 || j < 0 || j >= tiles.length) return;
+    // Never move structural tiles out of their trailing slots.
+    var a = tiles[idx], b = tiles[j];
+    if (isStructural(a) || isStructural(b)) return;
+    tiles[j] = a;
+    tiles[idx] = b;
+    persist();
+    render(t.id);
+    (reopen || openMenu)(t);
+  }
+
+  function toggleHidden(t, reopen) {
+    t.hidden = !t.hidden;
+    persist();
+    render(t.id);
+    (reopen || openMenu)(t);
+  }
+
+  function refocusTile(t) {
+    if (t && t.el) { try { t.el.focus({preventScroll:true}); } catch (e) { t.el.focus(); } }
+  }
+
+  function forceClose(t) {
+    postControl('closeApp', t.id, function (ok) {
+      if (!ok) showDbg('close failed: ' + t.id);
+      closeMenu();
+      refocusTile(t);
+    });
+  }
+
+  function uninstallTile(t) {
+    postUninstall(t.id, function (ok) {
+      if (!ok) {
+        showDbg('uninstall failed: ' + t.id);
+        closeMenu();
+        refocusTile(t);
+        return;
+      }
+      tiles = tiles.filter(function (x) { return x !== t; });
+      persist();
+      render();
+    });
+  }
+
+  function openMenu(t) {
+    closeMenu();
+    if (isStructural(t)) return;
+    menuTile = t;
+    var m = t.menuEl;
+    m.innerHTML = '';
+    var left = document.createElement('button');
+    left.textContent = '\u25c0 Move';
+    left.addEventListener('click', function (e) { e.stopPropagation(); moveTile(t, -1); });
+    var hide = document.createElement('button');
+    hide.textContent = t.hidden ? 'Unhide' : 'Hide';
+    hide.addEventListener('click', function (e) { e.stopPropagation(); toggleHidden(t); });
+    var right = document.createElement('button');
+    right.textContent = 'Move \u25b6';
+    right.addEventListener('click', function (e) { e.stopPropagation(); moveTile(t, 1); });
+    m.appendChild(left);
+    m.appendChild(hide);
+    m.appendChild(right);
+    m.className = 'tilemenu open';
+    try { left.focus({preventScroll:true}); } catch (e) { left.focus(); }
+  }
+
+  function closeMenu() {
+    if (menuTile && menuTile.menuEl) menuTile.menuEl.className = 'tilemenu';
+    menuTile = null;
+  }
+
+  function menuIsOpen() { return !!menuTile; }
+
+  function tileForEl(el) {
+    if (!el) return null;
+    try {
+      if (el.closest) {
+        var tileEl = el.closest('.tile');
+        if (tileEl) el = tileEl;
+      }
+    } catch (e) {}
+    for (var i = 0; i < tiles.length; i++) {
+      if (tiles[i].el === el) return tiles[i];
+    }
+    return null;
+  }
+
+  function menuButton(label, onTap) {
+    var b = document.createElement('button');
+    b.textContent = label;
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      onTap(b);
+    });
+    return b;
+  }
+
+  function focusFirst(menu) {
+    try {
+      var b = menu.querySelector('button');
+      if (b) b.focus({preventScroll:true});
+    } catch (e) {
+      try { menu.querySelector('button').focus(); } catch (e2) {}
+    }
+  }
+
+  // Long-press menu: force close, move, hide, uninstall. Structural tiles
+  // (edit/close) get none of it.
+  function openContextMenu(t) {
+    closeMenu();
+    if (!t || isStructural(t)) return;
+    menuTile = t;
+    var m = t.menuEl;
+    m.innerHTML = '';
+    m.appendChild(menuButton('\u2715 Close', function () { forceClose(t); }));
+    m.appendChild(menuButton('\u25c0', function () { moveTile(t, -1, openContextMenu); }));
+    m.appendChild(menuButton('\u25b6', function () { moveTile(t, 1, openContextMenu); }));
+    var hideBtn = menuButton(t.hidden ? 'Unhide' : 'Hide', function () {
+      toggleHidden(t, openContextMenu);
+    });
+    m.appendChild(hideBtn);
+    // Uninstall only for removable third-party apps: never inputs (they are
+    // system renderers, not packages) and never anything the launcher flags
+    // as non-removable. Two taps: arm, then confirm.
+    if (t.removable && !isInput(t.id)) {
+      var armed = false;
+      var unBtn = menuButton('Uninstall', function (btn) {
+        if (!armed) {
+          armed = true;
+          btn.textContent = 'Sure?';
+          try { btn.focus({preventScroll:true}); } catch (e) { btn.focus(); }
+          return;
+        }
+        uninstallTile(t);
+      });
+      m.appendChild(unBtn);
+    }
+    m.className = 'tilemenu open';
+    focusFirst(m);
+  }
+
+  function setEditMode(on) {
+    editMode = !!on;
+    render();
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.keyCode === 461 || e.keyCode === 27 || e.keyCode === 8) {
+      e.preventDefault();
+      if (menuIsOpen()) {
+        var t = menuTile;
+        closeMenu();
+        if (t && t.el) { try { t.el.focus({preventScroll:true}); } catch (e) { t.el.focus(); } }
+      } else if (editMode) {
+        setEditMode(false);
+      } else {
+        closeBar();
+      }
+      return;
+    }
+    // OK/Enter: always preventDefault the native click and replay short
+    // presses manually on keyup, so hold-vs-tap never races activation.
+    if (e.keyCode === 13) {
+      e.preventDefault();
+      if (e.repeat || pressTimer) return;
+      pressTimer = setTimeout(function () {
+        pressTimer = null;
+        pressFired = true;
+        openContextMenu(tileForEl(document.activeElement));
+      }, LONG_MS);
+      return;
+    }
+    var scope = menuIsOpen()
+      ? Array.prototype.slice.call(menuTile.menuEl.querySelectorAll('button'))
+      : Array.prototype.slice.call(row.querySelectorAll('.tile'));
+    var idx = -1;
+    for (var i = 0; i < scope.length; i++) {
+      if (scope[i] === document.activeElement) { idx = i; break; }
+    }
+    var n = null;
+    if (e.keyCode === 37) n = scope[(idx - 1 + scope.length) % scope.length];
+    else if (e.keyCode === 39) n = scope[(idx + 1) % scope.length];
+    if (n) {
+      e.preventDefault();
+      try { n.focus({preventScroll:true}); } catch (e) { n.focus(); }
+      if (!menuIsOpen()) {
+        try { n.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch (e2) {}
+      }
+    }
+  });
+
+  // Short OK press replayed here (native click was preventDefaulted above).
+  document.addEventListener('keyup', function (e) {
+    if (e.keyCode !== 13) return;
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    if (pressFired) {
+      pressFired = false;
+      return;
+    }
+    var ae = document.activeElement;
+    if (ae && ae.click) {
+      try { ae.click(); } catch (e2) {}
+    }
+  });
+
+  // Auto-close after 10s idle so the bar never lingers over video.
+  // Any key or click restarts the countdown.
+  var IDLE_MS = 10000;
+  var idleTimer = null;
+  function armIdle() {
+    try { if (idleTimer) clearTimeout(idleTimer); } catch (e) {}
+    idleTimer = setTimeout(function () { closeBar(); }, IDLE_MS);
+  }
+  ['keydown', 'click'].forEach(function (ev) {
+    document.addEventListener(ev, function () { armIdle(); }, true);
+  });
+
+  // A fresh launch always starts out of edit mode (the page may be kept alive
+  // between launches, so reset on becoming visible too).
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) {
+      if (editMode || menuIsOpen()) {
+        editMode = false;
+        render();
+      }
+      armIdle();
+    }
+  });
+
+  function staticPoints() {
+    return [
+      { id: 'com.webos.app.discovery', title: 'Apps', iconColor: '#4faa6e' },
+      { id: 'com.webos.app.hdmi1', title: 'HDMI 1', iconColor: '#6D757F' },
+      { id: 'com.webos.app.hdmi2', title: 'HDMI 2', iconColor: '#6D757F' },
+      { id: 'com.webos.app.hdmi3', title: 'HDMI 3', iconColor: '#6D757F' },
+      { id: 'com.webos.app.hdmi4', title: 'HDMI 4', iconColor: '#6D757F' },
+      { id: 'com.webos.app.livetv', title: 'Live TV', iconColor: '#E55E78' }
+    ];
+  }
+
+  function get(url, cb) {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.onreadystatechange = function () {
+        if (xhr.readyState !== 4) return;
+        if (xhr.status !== 200) return cb(null);
+        try { cb(JSON.parse(xhr.responseText)); }
+        catch (e) { cb(null); }
+      };
+      xhr.onerror = function () { cb(null); };
+      xhr.send();
+    } catch (e) { cb(null); }
+  }
+
+  function boot(points) {
+    tiles = orderedTiles(points && points.length ? points : staticPoints());
+    render();
+    armIdle();
+  }
+
+  get(API + '/api/launchpoints', function (lp) {
+    boot(lp && lp.points);
+  });
+})();
+</script>
+</body>
+</html>
